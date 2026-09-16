@@ -42,9 +42,11 @@ const DRAG_CLICK_THRESHOLD_PX = 6
 // tracking and ease the rest of the way in on its own, like a magnet catch.
 const DRAG_MAGNET_ZONE = 0.12
 // Extra world-space margin added to the tonearm's invisible hit box on every
-// axis, so it's forgiving to grab (especially by touch) without expanding it
-// so much it starts overlapping the vinyl/base's own click target.
+// axis, so it's forgiving to grab without expanding it so much it starts
+// overlapping the vinyl/base's own click target. Touch fingers are much less
+// precise than a mouse cursor, so coarse pointers get a noticeably bigger one.
 const TONEARM_HIT_PADDING = 0.12
+const TONEARM_HIT_PADDING_COARSE = 0.4
 
 const BASE_POSITION = [0.37, 1.7, -0.19]
 const BASE_ROTATION = [-0.83, -0.93, -0.85]
@@ -61,7 +63,7 @@ const CAMERA_TONEARM_OFFSET = [-0.12, 0.05, 0.1]
 // Below this width/height ratio (portrait-ish viewports, e.g. phones) the
 // fixed framing starts cropping the turntable, so zoom out proportionally to
 // how much narrower the viewport is than it is tall.
-const RESPONSIVE_ZOOM_MIN = 0.55
+const RESPONSIVE_ZOOM_MIN = 0.75
 
 function responsiveZoom(baseZoom, width, height) {
   if (!width || !height) return baseZoom
@@ -97,6 +99,22 @@ function playWithGestureFallback(audio) {
     window.addEventListener('pointerdown', retry, { once: true })
     window.addEventListener('keydown', retry, { once: true })
   })
+}
+
+// True on touch-first devices (finger, not mouse/trackpad) — used to widen
+// the tonearm's hit target where precision is worse.
+function useCoarsePointer() {
+  const [coarse, setCoarse] = useState(() => window.matchMedia?.('(pointer: coarse)').matches ?? false)
+
+  useEffect(() => {
+    const query = window.matchMedia?.('(pointer: coarse)')
+    if (!query) return undefined
+    const handleChange = (event) => setCoarse(event.matches)
+    query.addEventListener('change', handleChange)
+    return () => query.removeEventListener('change', handleChange)
+  }, [])
+
+  return coarse
 }
 
 function Turntable({
@@ -135,12 +153,14 @@ function Turntable({
   // The tonearm's own geometry is thin, which makes it an easy target to miss
   // on touch. Raycast against a padded invisible box around it instead, so
   // the actually-draggable area is a bit larger than what's visible.
+  const isCoarsePointer = useCoarsePointer()
   const tonearmHitArea = useMemo(() => {
     const box = new Box3().setFromObject(tonearm.scene)
     const size = box.getSize(new Vector3())
     const center = box.getCenter(new Vector3())
-    return { center: [center.x, center.y, center.z], size: [size.x + TONEARM_HIT_PADDING, size.y + TONEARM_HIT_PADDING, size.z + TONEARM_HIT_PADDING] }
-  }, [tonearm.scene])
+    const padding = isCoarsePointer ? TONEARM_HIT_PADDING_COARSE : TONEARM_HIT_PADDING
+    return { center: [center.x, center.y, center.z], size: [size.x + padding, size.y + padding, size.z + padding] }
+  }, [tonearm.scene, isCoarsePointer])
 
   // Ramp the spin speed toward its target (rather than snapping) so starting
   // and stopping ease in/out instead of jumping straight to/from full speed.
