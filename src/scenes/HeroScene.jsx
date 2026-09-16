@@ -23,6 +23,14 @@ const PROGRESS_SNAP_EPSILON = 0.0008
 // seconds of perceived lag. Treat it as arrived once it's this close instead
 // (the pose itself keeps easing the rest of the way in, imperceptibly).
 const TONEARM_SETTLED_THRESHOLD = 0.05
+// Pixels of pointer movement to drag the tonearm across its full trajectory.
+const DRAG_DRIVE_DISTANCE = 260
+// A press+release with less movement than this still counts as a plain
+// click (toggle fully engaged/disengaged) rather than a drag.
+const DRAG_CLICK_THRESHOLD_PX = 6
+// Once dragged within this fraction of the final position, let go of 1:1
+// tracking and ease the rest of the way in on its own, like a magnet catch.
+const DRAG_MAGNET_ZONE = 0.12
 
 const BASE_POSITION = [0.37, 1.7, -0.19]
 const BASE_ROTATION = [-0.83, -0.93, -0.85]
@@ -77,7 +85,7 @@ function Turntable({
   tonearmPosition,
   tonearmRotation,
   vinylSpinning,
-  onToggle,
+  onTonearmPointerDown,
   ...props
 }) {
   const base = useGLTF('/turntable3.glb')
@@ -173,8 +181,8 @@ function Turntable({
   return (
     <Center
       {...props}
-      onClick={onToggle}
-      onPointerOver={() => (document.body.style.cursor = 'pointer')}
+      onPointerDown={onTonearmPointerDown}
+      onPointerOver={() => (document.body.style.cursor = 'grab')}
       onPointerOut={() => (document.body.style.cursor = 'auto')}
     >
       <group position={basePosition} rotation={baseRotation}>
@@ -288,11 +296,46 @@ function HeroScene() {
     return () => cancelAnimationFrame(rafId)
   }, [])
 
-  // Clicking the turntable hands control back to normal page scrolling and
-  // switches back to click-to-toggle for play/stop.
-  const handleToggle = () => {
+  // Pressing the turntable hands control back to normal page scrolling, same
+  // as the old click did. A press+release with barely any movement still
+  // toggles fully engaged/disengaged; an actual drag (leftward = toward the
+  // record) moves the tonearm 1:1 with the pointer along its trajectory (it
+  // can't leave it — there's only ever a `progress` value to drag), until it
+  // gets close to the final position, at which point it lets go and eases in
+  // the rest of the way on its own, like a magnet catching it.
+  const handleTonearmPointerDown = (event) => {
+    event.stopPropagation()
     if (scrollControlEnabled) setScrollControlEnabled(false)
-    progressTargetRef.current = progressTargetRef.current < 1 ? 1 : 0
+    document.body.style.cursor = 'grabbing'
+
+    const startX = event.clientX
+    const startProgress = progressRef.current
+    let dragged = false
+
+    const handlePointerMove = (moveEvent) => {
+      const deltaX = startX - moveEvent.clientX
+      if (Math.abs(deltaX) > DRAG_CLICK_THRESHOLD_PX) dragged = true
+      const raw = clamp01(startProgress + deltaX / DRAG_DRIVE_DISTANCE)
+      if (raw >= 1 - DRAG_MAGNET_ZONE) {
+        progressTargetRef.current = 1
+      } else {
+        progressRef.current = raw
+        progressTargetRef.current = raw
+        setProgress(raw)
+      }
+    }
+
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      document.body.style.cursor = 'pointer'
+      if (!dragged) {
+        progressTargetRef.current = progressTargetRef.current < 1 ? 1 : 0
+      }
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
   }
 
   // While scroll is driving the tonearm, wheel input moves its target along
@@ -364,7 +407,7 @@ function HeroScene() {
             tonearmPosition={tonearmPosition}
             tonearmRotation={tonearmRotation}
             vinylSpinning={tonearmEngaged}
-            onToggle={handleToggle}
+            onTonearmPointerDown={handleTonearmPointerDown}
           />
           <Environment preset="sunset" />
         </Suspense>
