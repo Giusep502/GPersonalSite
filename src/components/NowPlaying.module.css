@@ -1,0 +1,34 @@
+.nowPlaying {
+  position: fixed;
+  right: 32px;
+  bottom: 32px;
+  z-index: 10;
+  color: #fff;
+  text-align: right;
+  opacity: 0;
+  transition: opacity 0.8s ease;
+  pointer-events: none;
+}
+
+.visible {
+  opacity: 1;
+}
+
+.label {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.title {
+  margin: 4px 0 0;
+  font-size: 1.6rem;
+  font-weight: 500;
+}
+
+.credit {
+  margin: 2px 0 0;
+  font-size: 1.2rem;
+  color: rgba(255, 255, 255, 0.7);
+}

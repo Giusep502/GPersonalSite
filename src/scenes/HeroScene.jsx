@@ -67,7 +67,7 @@ function playWithGestureFallback(audio) {
   if (!result?.catch) return
   result.catch(() => {
     const retry = () => {
-      audio.play().catch(() => {})
+      audio.play().catch(() => { })
     }
     window.addEventListener('pointerdown', retry, { once: true })
     window.addEventListener('keydown', retry, { once: true })
@@ -241,7 +241,7 @@ function CameraRig({ position, zoom, progress }) {
   return <PerspectiveCamera ref={cameraRef} makeDefault fov={50} />
 }
 
-function HeroScene() {
+function HeroScene({ onPlayingChange }) {
   // 0 = tonearm resting, 1 = tonearm down on the record. `progress` is what's
   // actually displayed each frame; it continuously eases toward `progressTarget`
   // (set instantly by clicks or wheel input) instead of snapping to it, so
@@ -256,6 +256,7 @@ function HeroScene() {
   const audioRef = useRef(null)
   const armupAudioRef = useRef(null)
   const wasTonearmAtFinalRef = useRef(false)
+  const timeoutRef = useRef(null)
 
   const tonearmEngaged = progress > 0
   const tonearmAtFinal = progress >= 1 - TONEARM_SETTLED_THRESHOLD
@@ -347,16 +348,19 @@ function HeroScene() {
 
     const handleWheel = (event) => {
       const target = progressTargetRef.current
+      if(scrollControlEnabled) event.preventDefault()
       if (target >= 1 && event.deltaY > 0) return
       if (target <= 0 && event.deltaY < 0) return
-      event.preventDefault()
       const next = clamp01(target + event.deltaY / SCROLL_DRIVE_DISTANCE)
       progressTargetRef.current = next
-      if (next >= 1) setScrollControlEnabled(false)
+      if (next >= 1 && !timeoutRef.current) timeoutRef.current = setTimeout(() => setScrollControlEnabled(false), 1000)
     }
 
     window.addEventListener('wheel', handleWheel, { passive: false })
-    return () => window.removeEventListener('wheel', handleWheel)
+    return () => {
+      window.removeEventListener('wheel', handleWheel)
+      clearTimeout(timeoutRef.current)
+    }
   }, [scrollControlEnabled])
 
   // Play while the tonearm sits at the final position, stop the moment it
@@ -377,7 +381,8 @@ function HeroScene() {
       }
     }
     wasTonearmAtFinalRef.current = tonearmAtFinal
-  }, [tonearmAtFinal])
+    onPlayingChange?.(tonearmAtFinal)
+  }, [tonearmAtFinal, onPlayingChange])
 
   // If the audio finishes on its own, loop just its last few seconds instead
   // of stopping — but only once we actually know the duration, otherwise
