@@ -34,7 +34,10 @@ const PROGRESS_SNAP_EPSILON = 0.0008
 // (the pose itself keeps easing the rest of the way in, imperceptibly).
 const TONEARM_SETTLED_THRESHOLD = 0.05
 // Pixels of pointer movement to drag the tonearm across its full trajectory.
-const DRAG_DRIVE_DISTANCE = 260
+// Touch gets a shorter distance since a thumb has much less comfortable
+// swipe range on a phone screen than a mouse does on a desktop.
+const DRAG_DRIVE_DISTANCE = 180
+const DRAG_DRIVE_DISTANCE_COARSE = 110
 // A press+release with less movement than this still counts as a plain
 // click (toggle fully engaged/disengaged) rather than a drag.
 const DRAG_CLICK_THRESHOLD_PX = 6
@@ -311,6 +314,7 @@ function CameraRig({ position, zoom, progress }) {
 }
 
 function HeroScene({ onPlayingChange }) {
+  const isCoarsePointer = useCoarsePointer()
   // 0 = tonearm resting, 1 = tonearm down on the record. `progress` is what's
   // actually displayed each frame; it continuously eases toward `progressTarget`
   // (set instantly by clicks or wheel input) instead of snapping to it, so
@@ -441,12 +445,13 @@ function HeroScene({ onPlayingChange }) {
 
     const startX = event.clientX
     const startProgress = progressRef.current
+    const dragDriveDistance = isCoarsePointer ? DRAG_DRIVE_DISTANCE_COARSE : DRAG_DRIVE_DISTANCE
     let dragged = false
 
     const handlePointerMove = (moveEvent) => {
       const deltaX = startX - moveEvent.clientX
       if (Math.abs(deltaX) > DRAG_CLICK_THRESHOLD_PX) dragged = true
-      const raw = clamp01(startProgress + deltaX / DRAG_DRIVE_DISTANCE)
+      const raw = clamp01(startProgress + deltaX / dragDriveDistance)
       if (raw >= 1 - DRAG_MAGNET_ZONE) {
         progressTargetRef.current = 1
       } else {
