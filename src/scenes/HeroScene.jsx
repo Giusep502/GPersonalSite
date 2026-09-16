@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Center, Environment, PerspectiveCamera, useGLTF, useTexture } from '@react-three/drei'
 import { Box3, RepeatWrapping, SRGBColorSpace, Vector3 } from 'three'
 import TonearmDevPanel from '../components/TonearmDevPanel'
@@ -41,6 +41,10 @@ const DRAG_CLICK_THRESHOLD_PX = 6
 // Once dragged within this fraction of the final position, let go of 1:1
 // tracking and ease the rest of the way in on its own, like a magnet catch.
 const DRAG_MAGNET_ZONE = 0.12
+// Extra world-space margin added to the tonearm's invisible hit box on every
+// axis, so it's forgiving to grab (especially by touch) without expanding it
+// so much it starts overlapping the vinyl/base's own click target.
+const TONEARM_HIT_PADDING = 0.12
 
 const BASE_POSITION = [0.37, 1.7, -0.19]
 const BASE_ROTATION = [-0.83, -0.93, -0.85]
@@ -54,6 +58,17 @@ const CAMERA_ZOOM = 1
 // Very small camera drift applied as the tonearm travels, just to add a
 // touch of life to the shot — not meant to read as a deliberate camera move.
 const CAMERA_TONEARM_OFFSET = [-0.12, 0.05, 0.1]
+// Below this width/height ratio (portrait-ish viewports, e.g. phones) the
+// fixed framing starts cropping the turntable, so zoom out proportionally to
+// how much narrower the viewport is than it is tall.
+const RESPONSIVE_ZOOM_MIN = 0.55
+
+function responsiveZoom(baseZoom, width, height) {
+  if (!width || !height) return baseZoom
+  const aspect = width / height
+  if (aspect >= 1) return baseZoom
+  return Math.max(RESPONSIVE_ZOOM_MIN, baseZoom * aspect)
+}
 
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
@@ -116,6 +131,16 @@ function Turntable({
     const box = new Box3().setFromObject(vinyl.scene)
     return box.getCenter(new Vector3())
   }, [vinyl.scene])
+
+  // The tonearm's own geometry is thin, which makes it an easy target to miss
+  // on touch. Raycast against a padded invisible box around it instead, so
+  // the actually-draggable area is a bit larger than what's visible.
+  const tonearmHitArea = useMemo(() => {
+    const box = new Box3().setFromObject(tonearm.scene)
+    const size = box.getSize(new Vector3())
+    const center = box.getCenter(new Vector3())
+    return { center: [center.x, center.y, center.z], size: [size.x + TONEARM_HIT_PADDING, size.y + TONEARM_HIT_PADDING, size.z + TONEARM_HIT_PADDING] }
+  }, [tonearm.scene])
 
   // Ramp the spin speed toward its target (rather than snapping) so starting
   // and stopping ease in/out instead of jumping straight to/from full speed.
@@ -214,14 +239,18 @@ function Turntable({
           </group>
         </group>
       </group>
-      <primitive
-        object={tonearm.scene}
-        position={tonearmPosition}
-        rotation={tonearmRotation}
-        onPointerDown={onTonearmPointerDown}
-        onPointerOver={() => (document.body.style.cursor = 'grab')}
-        onPointerOut={() => (document.body.style.cursor = 'auto')}
-      />
+      <group position={tonearmPosition} rotation={tonearmRotation}>
+        <primitive object={tonearm.scene} />
+        <mesh
+          position={tonearmHitArea.center}
+          visible={false}
+          onPointerDown={onTonearmPointerDown}
+          onPointerOver={() => (document.body.style.cursor = 'grab')}
+          onPointerOut={() => (document.body.style.cursor = 'auto')}
+        >
+          <boxGeometry args={tonearmHitArea.size} />
+        </mesh>
+      </group>
     </Center>
   )
 }
@@ -235,13 +264,15 @@ useGLTF.preload('/tonearm.glb')
 // perfectly static while it plays.
 function CameraRig({ position, zoom, progress }) {
   const cameraRef = useRef(null)
+  const { width, height } = useThree((state) => state.size)
+  const effectiveZoom = useMemo(() => responsiveZoom(zoom, width, height), [zoom, width, height])
 
   useEffect(() => {
     const camera = cameraRef.current
     if (!camera) return
-    camera.zoom = zoom
+    camera.zoom = effectiveZoom
     camera.updateProjectionMatrix()
-  }, [zoom])
+  }, [effectiveZoom])
 
   useFrame(() => {
     const camera = cameraRef.current
@@ -368,6 +399,11 @@ function HeroScene({ onPlayingChange }) {
   // the rest of the way on its own, like a magnet catching it.
   const handleTonearmPointerDown = (event) => {
     event.stopPropagation()
+    // Without this, touch input on the tonearm gets interpreted as a page
+    // scroll gesture before pointermove ever fires, since the canvas has no
+    // touch-action restricting that. Calling preventDefault on the pointerdown
+    // itself is what suppresses the browser's default touch scrolling here.
+    event.nativeEvent.preventDefault()
     if (scrollControlEnabled) setScrollControlEnabled(false)
     document.body.style.cursor = 'grabbing'
 
