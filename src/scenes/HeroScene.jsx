@@ -7,10 +7,22 @@ const TONEARM_DEFAULT_POSITION = [0.16, -0.08, 1.56];
 const TONEARM_DEFAULT_ROTATION = [0, 0.18, 0];
 const TONEARM_FINAL_POSITION = [0.21, -0.22, 0.82]
 const TONEARM_FINAL_ROTATION = [-0.28, -0.56, 0]
-const TONEARM_ANIMATION_DURATION_MS = 2200
 const VINYL_SPIN_SPEED = 3.49 // rad/s, ~33 1/3 RPM
 const VINYL_SPIN_RAMP_MS = 1500
 const AUDIO_LOOP_TAIL_SECONDS = 10
+// How many pixels of wheel deltaY it takes to move the tonearm's target all
+// the way through its trajectory while scroll is driving it.
+const SCROLL_DRIVE_DISTANCE = 640
+// How fast the displayed progress chases its target each second (higher =
+// snappier catch-up). Scrolling further ahead widens the gap, so scrolling
+// harder makes the tonearm visibly move faster, not just jump.
+const PROGRESS_SMOOTHING_RATE = 3
+const PROGRESS_SNAP_EPSILON = 0.0008
+// The easing has a long asymptotic tail, so waiting for `progress` to reach
+// exactly 0/1 before treating the tonearm as "arrived" adds a couple of
+// seconds of perceived lag. Treat it as arrived once it's this close instead
+// (the pose itself keeps easing the rest of the way in, imperceptibly).
+const TONEARM_SETTLED_THRESHOLD = 0.05
 
 const BASE_POSITION = [0.37, 1.7, -0.19]
 const BASE_ROTATION = [-0.83, -0.93, -0.85]
@@ -21,6 +33,9 @@ const VINYL_TEXTURE_REPEAT = [1, 1]
 const VINYL_TEXTURE_ROTATION = 0
 const CAMERA_POSITION = [-4.77, 3.73, 9]
 const CAMERA_ZOOM = 1
+// Very small camera drift applied as the tonearm travels, just to add a
+// touch of life to the shot — not meant to read as a deliberate camera move.
+const CAMERA_TONEARM_OFFSET = [-0.12, 0.05, 0.1]
 
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
@@ -28,6 +43,27 @@ function easeInOutCubic(t) {
 
 function lerpVec3(from, to, t) {
   return [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t, from[2] + (to[2] - from[2]) * t]
+}
+
+function clamp01(value) {
+  return Math.min(1, Math.max(0, value))
+}
+
+// Browsers only allow audio to autoplay following a "real" activating
+// gesture (click/key/touch) — a wheel/scroll event doesn't count, so a
+// play() triggered purely by scrolling can be silently blocked. If that
+// happens, retry on the next qualifying gesture instead of staying silent.
+function playWithGestureFallback(audio) {
+  if (!audio) return
+  const result = audio.play()
+  if (!result?.catch) return
+  result.catch(() => {
+    const retry = () => {
+      audio.play().catch(() => {})
+    }
+    window.addEventListener('pointerdown', retry, { once: true })
+    window.addEventListener('keydown', retry, { once: true })
+  })
 }
 
 function Turntable({
@@ -168,71 +204,117 @@ useGLTF.preload('/turntable3.glb')
 useGLTF.preload('/Vinyl.glb')
 useGLTF.preload('/tonearm.glb')
 
-// Applies the fixed camera position/zoom to the actual three.js camera each
-// time they change, and keeps it aimed at the turntable (origin) since there
-// are no OrbitControls to handle that anymore.
-function CameraRig({ position, zoom }) {
+// Applies the fixed camera position/zoom to the actual three.js camera, plus
+// a very small drift tied to the tonearm's progress so the shot doesn't feel
+// perfectly static while it plays.
+function CameraRig({ position, zoom, progress }) {
   const cameraRef = useRef(null)
 
   useEffect(() => {
     const camera = cameraRef.current
     if (!camera) return
-    camera.position.set(...position)
     camera.zoom = zoom
-    camera.lookAt(0, 0, 0)
     camera.updateProjectionMatrix()
-  }, [position, zoom])
+  }, [zoom])
+
+  useFrame(() => {
+    const camera = cameraRef.current
+    if (!camera) return
+    const eased = easeInOutCubic(progress)
+    const drifted = [
+      position[0] + CAMERA_TONEARM_OFFSET[0] * eased,
+      position[1] + CAMERA_TONEARM_OFFSET[1] * eased,
+      position[2] + CAMERA_TONEARM_OFFSET[2] * eased,
+    ]
+    camera.position.set(...drifted)
+    camera.lookAt(0, 0, 0)
+  })
 
   return <PerspectiveCamera ref={cameraRef} makeDefault fov={50} />
 }
 
 function HeroScene() {
-  const [tonearmPosition, setTonearmPosition] = useState(TONEARM_DEFAULT_POSITION)
-  const [tonearmRotation, setTonearmRotation] = useState(TONEARM_DEFAULT_ROTATION)
-  const [tonearmEngaged, setTonearmEngaged] = useState(false)
-  const [tonearmAtFinal, setTonearmAtFinal] = useState(false)
-  const tonearmAnimationRef = useRef(null)
+  // 0 = tonearm resting, 1 = tonearm down on the record. `progress` is what's
+  // actually displayed each frame; it continuously eases toward `progressTarget`
+  // (set instantly by clicks or wheel input) instead of snapping to it, so
+  // motion stays smooth regardless of how choppy the input is.
+  const [progress, setProgress] = useState(0)
+  // Scroll drives the tonearm until it reaches the final position or the
+  // user clicks the turntable; after that, scrolling behaves normally and
+  // clicking toggles play/stop instead.
+  const [scrollControlEnabled, setScrollControlEnabled] = useState(true)
+  const progressRef = useRef(0)
+  const progressTargetRef = useRef(0)
   const audioRef = useRef(null)
   const armupAudioRef = useRef(null)
   const wasTonearmAtFinalRef = useRef(false)
 
-  // Cancel any in-flight tonearm animation on unmount so it doesn't keep
-  // calling setState after the component is gone.
+  const tonearmEngaged = progress > 0
+  const tonearmAtFinal = progress >= 1 - TONEARM_SETTLED_THRESHOLD
+
+  const tonearmPosition = useMemo(
+    () => lerpVec3(TONEARM_DEFAULT_POSITION, TONEARM_FINAL_POSITION, easeInOutCubic(progress)),
+    [progress]
+  )
+  const tonearmRotation = useMemo(
+    () => lerpVec3(TONEARM_DEFAULT_ROTATION, TONEARM_FINAL_ROTATION, easeInOutCubic(progress)),
+    [progress]
+  )
+
+  // Continuously eases the displayed progress toward whatever clicks/wheel
+  // input last set as the target, instead of jumping straight to it.
   useEffect(() => {
-    return () => {
-      if (tonearmAnimationRef.current) cancelAnimationFrame(tonearmAnimationRef.current)
+    let rafId
+    let lastTimestamp = null
+
+    const tick = (now) => {
+      if (lastTimestamp === null) lastTimestamp = now
+      const dt = Math.min((now - lastTimestamp) / 1000, 0.1)
+      lastTimestamp = now
+      const target = progressTargetRef.current
+      const current = progressRef.current
+      if (Math.abs(target - current) > PROGRESS_SNAP_EPSILON) {
+        const next = current + (target - current) * Math.min(1, dt * PROGRESS_SMOOTHING_RATE)
+        progressRef.current = next
+        setProgress(next)
+      } else if (current !== target) {
+        progressRef.current = target
+        setProgress(target)
+      }
+      rafId = requestAnimationFrame(tick)
     }
+
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
   }, [])
 
-  const playTonearmAnimation = () => {
-    if (tonearmAnimationRef.current) cancelAnimationFrame(tonearmAnimationRef.current)
-    // Start from wherever the tonearm currently is (not a fixed constant) so
-    // clicking mid-animation reverses smoothly instead of jumping.
-    const startPosition = tonearmPosition
-    const startRotation = tonearmRotation
-    const engaging = !tonearmEngaged
-    const targetPosition = engaging ? TONEARM_FINAL_POSITION : TONEARM_DEFAULT_POSITION
-    const targetRotation = engaging ? TONEARM_FINAL_ROTATION : TONEARM_DEFAULT_ROTATION
-    setTonearmEngaged(engaging)
-    // Leaving the final position stops the audio right away; arriving there
-    // only counts once the animation actually finishes (below).
-    if (!engaging) setTonearmAtFinal(false)
-    const startTime = performance.now()
-
-    const step = (now) => {
-      const t = Math.min((now - startTime) / TONEARM_ANIMATION_DURATION_MS, 1)
-      const eased = easeInOutCubic(t)
-      setTonearmPosition(lerpVec3(startPosition, targetPosition, eased))
-      setTonearmRotation(lerpVec3(startRotation, targetRotation, eased))
-      if (t < 1) {
-        tonearmAnimationRef.current = requestAnimationFrame(step)
-      } else {
-        tonearmAnimationRef.current = null
-        if (engaging) setTonearmAtFinal(true)
-      }
-    }
-    tonearmAnimationRef.current = requestAnimationFrame(step)
+  // Clicking the turntable hands control back to normal page scrolling and
+  // switches back to click-to-toggle for play/stop.
+  const handleToggle = () => {
+    if (scrollControlEnabled) setScrollControlEnabled(false)
+    progressTargetRef.current = progressTargetRef.current < 1 ? 1 : 0
   }
+
+  // While scroll is driving the tonearm, wheel input moves its target along
+  // the trajectory instead of scrolling the page; the smoothing loop above
+  // handles actually animating toward it. Once the target reaches the final
+  // position, scroll control is handed back to the page.
+  useEffect(() => {
+    if (!scrollControlEnabled) return undefined
+
+    const handleWheel = (event) => {
+      const target = progressTargetRef.current
+      if (target >= 1 && event.deltaY > 0) return
+      if (target <= 0 && event.deltaY < 0) return
+      event.preventDefault()
+      const next = clamp01(target + event.deltaY / SCROLL_DRIVE_DISTANCE)
+      progressTargetRef.current = next
+      if (next >= 1) setScrollControlEnabled(false)
+    }
+
+    window.addEventListener('wheel', handleWheel, { passive: false })
+    return () => window.removeEventListener('wheel', handleWheel)
+  }, [scrollControlEnabled])
 
   // Play while the tonearm sits at the final position, stop the moment it
   // leaves. Resets to the start each stop so the next play starts fresh.
@@ -243,16 +325,12 @@ function HeroScene() {
     if (!audio) return
     if (tonearmAtFinal) {
       audio.currentTime = 0
-      audio.play()
+      playWithGestureFallback(audio)
     } else {
       audio.pause()
       audio.currentTime = 0
       if (wasTonearmAtFinalRef.current) {
-        const armup = armupAudioRef.current
-        if (armup) {
-          armup.currentTime = 0
-          armup.play()
-        }
+        playWithGestureFallback(armupAudioRef.current)
       }
     }
     wasTonearmAtFinalRef.current = tonearmAtFinal
@@ -265,7 +343,7 @@ function HeroScene() {
     const audio = audioRef.current
     if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return
     audio.currentTime = Math.max(0, audio.duration - AUDIO_LOOP_TAIL_SECONDS)
-    audio.play()
+    playWithGestureFallback(audio)
   }
 
   return (
@@ -273,7 +351,7 @@ function HeroScene() {
       <Canvas>
         <ambientLight intensity={0.6} />
         <directionalLight position={[3, 3, 3]} intensity={1.2} />
-        <CameraRig position={CAMERA_POSITION} zoom={CAMERA_ZOOM} />
+        <CameraRig position={CAMERA_POSITION} zoom={CAMERA_ZOOM} progress={progress} />
         <Suspense fallback={null}>
           <Turntable
             basePosition={BASE_POSITION}
@@ -286,13 +364,13 @@ function HeroScene() {
             tonearmPosition={tonearmPosition}
             tonearmRotation={tonearmRotation}
             vinylSpinning={tonearmEngaged}
-            onToggle={playTonearmAnimation}
+            onToggle={handleToggle}
           />
           <Environment preset="sunset" />
         </Suspense>
       </Canvas>
-      <audio ref={audioRef} src="/bubbles.mp3" onEnded={handleAudioEnded} />
-      <audio ref={armupAudioRef} src="/armup.mp3" />
+      <audio type="audio/mpeg" preload="auto" ref={audioRef} src="/bubbles.mp3" onEnded={handleAudioEnded} />
+      <audio type="audio/mpeg" preload="auto" ref={armupAudioRef} src="/armup.mp3" />
     </>
   )
 }
