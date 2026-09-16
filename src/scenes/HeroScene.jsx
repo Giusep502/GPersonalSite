@@ -2,11 +2,21 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Center, Environment, PerspectiveCamera, useGLTF, useTexture } from '@react-three/drei'
 import { Box3, RepeatWrapping, SRGBColorSpace, Vector3 } from 'three'
+import TonearmDevPanel from '../components/TonearmDevPanel'
 
-const TONEARM_DEFAULT_POSITION = [0.16, -0.08, 1.56];
+const TONEARM_DEFAULT_POSITION = [0.125, -0.09, 1.475];
 const TONEARM_DEFAULT_ROTATION = [0, 0.18, 0];
-const TONEARM_FINAL_POSITION = [0.21, -0.22, 0.82]
-const TONEARM_FINAL_ROTATION = [-0.28, -0.56, 0]
+const TONEARM_FINAL_POSITION = [0.125, -0.09, 0.48]
+const TONEARM_FINAL_ROTATION = [-0.028, -0.56, 0]
+// While the record is playing, the tonearm keeps creeping inward across the
+// groove for the length of the song, like a real stylus tracking toward the
+// label. Z position and Y rotation drift from their TONEARM_FINAL_* values
+// down to these over the whole track.
+const TONEARM_TRACKING_FINAL_Z = 0.36
+const TONEARM_TRACKING_FINAL_ROTATION_Y = -0.76
+// Fallback song length for the drift above, used only until the audio
+// element reports its real duration (it should land very close to this).
+const TONEARM_TRACKING_DURATION_SECONDS = 6 * 60
 const VINYL_SPIN_SPEED = 3.49 // rad/s, ~33 1/3 RPM
 const VINYL_SPIN_RAMP_MS = 1500
 const AUDIO_LOOP_TAIL_SECONDS = 10
@@ -37,7 +47,7 @@ const BASE_ROTATION = [-0.83, -0.93, -0.85]
 const VINYL_POSITION = [-0.03, 0, 0.13]
 const VINYL_ROTATION = [0, 0, 0]
 const VINYL_TEXTURE_OFFSET = [0, 0]
-const VINYL_TEXTURE_REPEAT = [1, 1]
+const VINYL_TEXTURE_REPEAT = [0, 15]
 const VINYL_TEXTURE_ROTATION = 0
 const CAMERA_POSITION = [-4.77, 3.73, 9]
 const CAMERA_ZOOM = 1
@@ -124,7 +134,7 @@ function Turntable({
     vinylSpeedRef.current = speed
     if (vinylSpinRef.current) vinylSpinRef.current.rotation.y += speed * delta
   })
-  const vinylTexture = useTexture('/textures/Texturelabs_Paper_334S.jpg', (texture) => {
+  const vinylTexture = useTexture('/textures/vinyl2.png', (texture) => {
     texture.colorSpace = SRGBColorSpace
     texture.flipY = false
     texture.wrapS = RepeatWrapping
@@ -172,9 +182,8 @@ function Turntable({
       if (child.material.name === 'label') return
       child.material = child.material.clone()
       child.material.map = vinylTexture
-      child.material.color.set('#ffffff')
-      child.material.metalness = 0.7
-      child.material.roughness = 0.8
+      child.material.metalness = 0
+      child.material.roughness = 1
       child.material.needsUpdate = true
     })
   }, [vinyl.scene, vinylTexture])
@@ -269,15 +278,50 @@ function HeroScene({ onPlayingChange }) {
 
   const tonearmEngaged = progress > 0
   const tonearmAtFinal = progress >= 1 - TONEARM_SETTLED_THRESHOLD
+  // 0 at the start of the track, 1 once it's played all the way through;
+  // drives the slow tracking drift below. Updated from the audio element's
+  // own `timeupdate` events rather than a timer, so it stays in sync even if
+  // playback stalls/buffers.
+  const [trackingProgress, setTrackingProgress] = useState(0)
+  // Ignore any stale/in-flight tracking progress once the tonearm has lifted
+  // back off — avoids needing a separate effect just to reset it to 0.
+  const effectiveTrackingProgress = tonearmAtFinal ? trackingProgress : 0
 
-  const tonearmPosition = useMemo(
-    () => lerpVec3(TONEARM_DEFAULT_POSITION, TONEARM_FINAL_POSITION, easeInOutCubic(progress)),
-    [progress]
+  const trackedTonearmFinalPosition = useMemo(
+    () => [
+      TONEARM_FINAL_POSITION[0],
+      TONEARM_FINAL_POSITION[1],
+      TONEARM_FINAL_POSITION[2] + (TONEARM_TRACKING_FINAL_Z - TONEARM_FINAL_POSITION[2]) * effectiveTrackingProgress,
+    ],
+    [effectiveTrackingProgress]
   )
-  const tonearmRotation = useMemo(
-    () => lerpVec3(TONEARM_DEFAULT_ROTATION, TONEARM_FINAL_ROTATION, easeInOutCubic(progress)),
-    [progress]
+  const trackedTonearmFinalRotation = useMemo(
+    () => [
+      TONEARM_FINAL_ROTATION[0],
+      TONEARM_FINAL_ROTATION[1] + (TONEARM_TRACKING_FINAL_ROTATION_Y - TONEARM_FINAL_ROTATION[1]) * effectiveTrackingProgress,
+      TONEARM_FINAL_ROTATION[2],
+    ],
+    [effectiveTrackingProgress]
   )
+
+  const animatedTonearmPosition = useMemo(
+    () => lerpVec3(TONEARM_DEFAULT_POSITION, trackedTonearmFinalPosition, easeInOutCubic(progress)),
+    [progress, trackedTonearmFinalPosition]
+  )
+  const animatedTonearmRotation = useMemo(
+    () => lerpVec3(TONEARM_DEFAULT_ROTATION, trackedTonearmFinalRotation, easeInOutCubic(progress)),
+    [progress, trackedTonearmFinalRotation]
+  )
+
+  // Dev-only: lets the tonearm's pose be dragged around live in the browser
+  // instead of guessing TONEARM_DEFAULT_*/TONEARM_FINAL_* values via
+  // edit/save/reload. Stripped out of production builds by import.meta.env.DEV.
+  const [devOverrideEnabled, setDevOverrideEnabled] = useState(false)
+  const [devTonearmPosition, setDevTonearmPosition] = useState(TONEARM_DEFAULT_POSITION)
+  const [devTonearmRotation, setDevTonearmRotation] = useState(TONEARM_DEFAULT_ROTATION)
+
+  const tonearmPosition = devOverrideEnabled ? devTonearmPosition : animatedTonearmPosition
+  const tonearmRotation = devOverrideEnabled ? devTonearmRotation : animatedTonearmRotation
 
   // Continuously eases the displayed progress toward whatever clicks/wheel
   // input last set as the target, instead of jumping straight to it.
@@ -402,6 +446,19 @@ function HeroScene({ onPlayingChange }) {
     onPlayingChange?.(tonearmAtFinal)
   }, [tonearmAtFinal, onPlayingChange])
 
+  // Drives the tracking drift (see TONEARM_TRACKING_FINAL_*) off the audio
+  // element's actual playback position instead of a separate timer.
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return undefined
+    const handleTimeUpdate = () => {
+      const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : TONEARM_TRACKING_DURATION_SECONDS
+      setTrackingProgress(clamp01(audio.currentTime / duration))
+    }
+    audio.addEventListener('timeupdate', handleTimeUpdate)
+    return () => audio.removeEventListener('timeupdate', handleTimeUpdate)
+  }, [])
+
   // If the audio finishes on its own, loop just its last few seconds instead
   // of stopping — but only once we actually know the duration, otherwise
   // just let it stop.
@@ -438,6 +495,16 @@ function HeroScene({ onPlayingChange }) {
       </Canvas>
       <audio type="audio/mpeg" preload="auto" ref={audioRef} src="/bubbles.mp3" onEnded={handleAudioEnded} />
       <audio type="audio/mpeg" preload="auto" ref={armupAudioRef} src="/armup.mp3" />
+      {import.meta.env.DEV && (
+        <TonearmDevPanel
+          enabled={devOverrideEnabled}
+          onToggleEnabled={setDevOverrideEnabled}
+          position={devTonearmPosition}
+          rotation={devTonearmRotation}
+          onPositionChange={setDevTonearmPosition}
+          onRotationChange={setDevTonearmRotation}
+        />
+      )}
     </>
   )
 }
