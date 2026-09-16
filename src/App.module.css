@@ -1,0 +1,9 @@
+.hero {
+  position: relative;
+  height: 100svh;
+}
+
+.canvasWrap {
+  position: absolute;
+  inset: 0;
+}

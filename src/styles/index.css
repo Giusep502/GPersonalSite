@@ -1,0 +1,25 @@
+:root {
+  --bg: #0b0b0f;
+  --text: #f3f4f6;
+  --text-muted: #9ca3af;
+  --accent: #c084fc;
+
+  color-scheme: dark;
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100svh;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+}
