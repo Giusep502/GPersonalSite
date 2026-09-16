@@ -3,6 +3,20 @@ import { Canvas } from '@react-three/fiber'
 import { Center, Environment, PerspectiveCamera, useGLTF, useTexture } from '@react-three/drei'
 import { RepeatWrapping, SRGBColorSpace } from 'three'
 
+const TONEARM_DEFAULT_POSITION = [0.16, -0.08, 1.56];
+const TONEARM_DEFAULT_ROTATION = [0, 0.18, 0];
+const TONEARM_FINAL_POSITION = [0.21, -0.22, 0.82]
+const TONEARM_FINAL_ROTATION = [-0.28, -0.56, 0]
+const TONEARM_ANIMATION_DURATION_MS = 2200
+
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
+
+function lerpVec3(from, to, t) {
+  return [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t, from[2] + (to[2] - from[2]) * t]
+}
+
 function Turntable({
   basePosition,
   baseRotation,
@@ -225,10 +239,42 @@ function HeroScene() {
   const [vinylTextureOffset, setVinylTextureOffset] = useState([0, 0])
   const [vinylTextureRepeat, setVinylTextureRepeat] = useState([1, 1])
   const [vinylTextureRotation, setVinylTextureRotation] = useState(0)
-  const [tonearmPosition, setTonearmPosition] = useState([0.21, -0.22, 0.82])
-  const [tonearmRotation, setTonearmRotation] = useState([-0.28, -0.56, 0])
+  const [tonearmPosition, setTonearmPosition] = useState(TONEARM_DEFAULT_POSITION)
+  const [tonearmRotation, setTonearmRotation] = useState(TONEARM_DEFAULT_ROTATION)
   const [cameraPosition, setCameraPosition] = useState(DEFAULT_CAMERA_POSITION)
   const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
+  const [tonearmEngaged, setTonearmEngaged] = useState(false)
+  const tonearmAnimationRef = useRef(null)
+
+  // Cancel any in-flight tonearm animation on unmount so it doesn't keep
+  // calling setState after the component is gone.
+  useEffect(() => {
+    return () => {
+      if (tonearmAnimationRef.current) cancelAnimationFrame(tonearmAnimationRef.current)
+    }
+  }, [])
+
+  const playTonearmAnimation = () => {
+    if (tonearmAnimationRef.current) cancelAnimationFrame(tonearmAnimationRef.current)
+    // Start from wherever the tonearm currently is (not a fixed constant) so
+    // clicking mid-animation reverses smoothly instead of jumping.
+    const startPosition = tonearmPosition
+    const startRotation = tonearmRotation
+    const engaging = !tonearmEngaged
+    const targetPosition = engaging ? TONEARM_FINAL_POSITION : TONEARM_DEFAULT_POSITION
+    const targetRotation = engaging ? TONEARM_FINAL_ROTATION : TONEARM_DEFAULT_ROTATION
+    setTonearmEngaged(engaging)
+    const startTime = performance.now()
+
+    const step = (now) => {
+      const t = Math.min((now - startTime) / TONEARM_ANIMATION_DURATION_MS, 1)
+      const eased = easeInOutCubic(t)
+      setTonearmPosition(lerpVec3(startPosition, targetPosition, eased))
+      setTonearmRotation(lerpVec3(startRotation, targetRotation, eased))
+      tonearmAnimationRef.current = t < 1 ? requestAnimationFrame(step) : null
+    }
+    tonearmAnimationRef.current = requestAnimationFrame(step)
+  }
 
   return (
     <>
@@ -252,10 +298,7 @@ function HeroScene() {
         </Suspense>
       </Canvas>
       <button
-        onClick={() => {
-          setCameraPosition(DEFAULT_CAMERA_POSITION)
-          setCameraZoom(DEFAULT_CAMERA_ZOOM)
-        }}
+        onClick={playTonearmAnimation}
         style={{
           position: 'fixed',
           top: 12,
@@ -271,7 +314,7 @@ function HeroScene() {
           zIndex: 10,
         }}
       >
-        Reset camera
+        {tonearmEngaged ? 'Reset tonearm' : 'Play tonearm'}
       </button>
       <PlacementControls
         basePosition={basePosition}
