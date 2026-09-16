@@ -1,13 +1,16 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { Canvas, useFrame } from '@react-three/fiber'
 import { Center, Environment, PerspectiveCamera, useGLTF, useTexture } from '@react-three/drei'
-import { RepeatWrapping, SRGBColorSpace } from 'three'
+import { Box3, RepeatWrapping, SRGBColorSpace, Vector3 } from 'three'
 
 const TONEARM_DEFAULT_POSITION = [0.16, -0.08, 1.56];
 const TONEARM_DEFAULT_ROTATION = [0, 0.18, 0];
 const TONEARM_FINAL_POSITION = [0.21, -0.22, 0.82]
 const TONEARM_FINAL_ROTATION = [-0.28, -0.56, 0]
 const TONEARM_ANIMATION_DURATION_MS = 2200
+const VINYL_SPIN_SPEED = 3.49 // rad/s, ~33 1/3 RPM
+const VINYL_SPIN_RAMP_MS = 1500
+const AUDIO_LOOP_TAIL_SECONDS = 10
 
 function easeInOutCubic(t) {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
@@ -27,12 +30,44 @@ function Turntable({
   vinylTextureRotation,
   tonearmPosition,
   tonearmRotation,
+  vinylSpinning,
   ...props
 }) {
   const base = useGLTF('/turntable3.glb')
   const vinyl = useGLTF('/Vinyl.glb')
   const tonearm = useGLTF('/tonearm.glb')
   const vinylTextureRef = useRef(null)
+  const vinylSpinRef = useRef(null)
+  const vinylSpeedRef = useRef(0)
+  const vinylRampRef = useRef({ from: 0, to: 0, startTime: 0 })
+
+  // The disc's own origin (from the .glb) isn't at its visual center, so
+  // spinning it directly would make it orbit instead of spin in place.
+  // Recenter around this pivot, then cancel the offset on both sides of the
+  // rotation so `vinylPosition`/`vinylRotation` keep placing it exactly
+  // where they did before.
+  const vinylCenter = useMemo(() => {
+    const box = new Box3().setFromObject(vinyl.scene)
+    return box.getCenter(new Vector3())
+  }, [vinyl.scene])
+
+  // Ramp the spin speed toward its target (rather than snapping) so starting
+  // and stopping ease in/out instead of jumping straight to/from full speed.
+  useEffect(() => {
+    vinylRampRef.current = {
+      from: vinylSpeedRef.current,
+      to: vinylSpinning ? VINYL_SPIN_SPEED : 0,
+      startTime: performance.now(),
+    }
+  }, [vinylSpinning])
+
+  useFrame((_, delta) => {
+    const { from, to, startTime } = vinylRampRef.current
+    const t = Math.min((performance.now() - startTime) / VINYL_SPIN_RAMP_MS, 1)
+    const speed = from + (to - from) * easeInOutCubic(t)
+    vinylSpeedRef.current = speed
+    if (vinylSpinRef.current) vinylSpinRef.current.rotation.y += speed * delta
+  })
   const vinylTexture = useTexture('/textures/Texturelabs_Paper_334S.jpg', (texture) => {
     texture.colorSpace = SRGBColorSpace
     texture.flipY = false
@@ -66,6 +101,7 @@ function Turntable({
         child.material = child.material.clone()
         child.material.map = plasticMap
         child.material.needsUpdate = true
+        child.material.metalness = 1
       }
     })
   }, [base.scene, base.materials])
@@ -97,7 +133,16 @@ function Turntable({
           <primitive object={base.scene} />
         </Center>
       </group>
-      <primitive object={vinyl.scene} position={vinylPosition} rotation={vinylRotation} />
+      <group position={vinylPosition} rotation={vinylRotation}>
+        <group position={vinylCenter}>
+          <group ref={vinylSpinRef}>
+            <primitive
+              object={vinyl.scene}
+              position={[-vinylCenter.x, -vinylCenter.y, -vinylCenter.z]}
+            />
+          </group>
+        </group>
+      </group>
       <primitive object={tonearm.scene} position={tonearmPosition} rotation={tonearmRotation} />
     </Center>
   )
@@ -244,7 +289,9 @@ function HeroScene() {
   const [cameraPosition, setCameraPosition] = useState(DEFAULT_CAMERA_POSITION)
   const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
   const [tonearmEngaged, setTonearmEngaged] = useState(false)
+  const [tonearmAtFinal, setTonearmAtFinal] = useState(false)
   const tonearmAnimationRef = useRef(null)
+  const audioRef = useRef(null)
 
   // Cancel any in-flight tonearm animation on unmount so it doesn't keep
   // calling setState after the component is gone.
@@ -264,6 +311,9 @@ function HeroScene() {
     const targetPosition = engaging ? TONEARM_FINAL_POSITION : TONEARM_DEFAULT_POSITION
     const targetRotation = engaging ? TONEARM_FINAL_ROTATION : TONEARM_DEFAULT_ROTATION
     setTonearmEngaged(engaging)
+    // Leaving the final position stops the audio right away; arriving there
+    // only counts once the animation actually finishes (below).
+    if (!engaging) setTonearmAtFinal(false)
     const startTime = performance.now()
 
     const step = (now) => {
@@ -271,9 +321,38 @@ function HeroScene() {
       const eased = easeInOutCubic(t)
       setTonearmPosition(lerpVec3(startPosition, targetPosition, eased))
       setTonearmRotation(lerpVec3(startRotation, targetRotation, eased))
-      tonearmAnimationRef.current = t < 1 ? requestAnimationFrame(step) : null
+      if (t < 1) {
+        tonearmAnimationRef.current = requestAnimationFrame(step)
+      } else {
+        tonearmAnimationRef.current = null
+        if (engaging) setTonearmAtFinal(true)
+      }
     }
     tonearmAnimationRef.current = requestAnimationFrame(step)
+  }
+
+  // Play while the tonearm sits at the final position, stop the moment it
+  // leaves. Resets to the start each stop so the next play starts fresh.
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    if (tonearmAtFinal) {
+      audio.currentTime = 0
+      audio.play()
+    } else {
+      audio.pause()
+      audio.currentTime = 0
+    }
+  }, [tonearmAtFinal])
+
+  // If the audio finishes on its own, loop just its last few seconds instead
+  // of stopping — but only once we actually know the duration, otherwise
+  // just let it stop.
+  const handleAudioEnded = () => {
+    const audio = audioRef.current
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return
+    audio.currentTime = Math.max(0, audio.duration - AUDIO_LOOP_TAIL_SECONDS)
+    audio.play()
   }
 
   return (
@@ -293,6 +372,7 @@ function HeroScene() {
             vinylTextureRotation={vinylTextureRotation}
             tonearmPosition={tonearmPosition}
             tonearmRotation={tonearmRotation}
+            vinylSpinning={tonearmEngaged}
           />
           <Environment preset="sunset" />
         </Suspense>
@@ -316,6 +396,7 @@ function HeroScene() {
       >
         {tonearmEngaged ? 'Reset tonearm' : 'Play tonearm'}
       </button>
+      <audio ref={audioRef} src="/bubbles.mp3" onEnded={handleAudioEnded} />
       <PlacementControls
         basePosition={basePosition}
         setBasePosition={setBasePosition}
