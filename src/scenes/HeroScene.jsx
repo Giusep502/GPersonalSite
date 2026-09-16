@@ -326,6 +326,7 @@ function HeroScene({ onPlayingChange }) {
   const armupAudioRef = useRef(null)
   const wasTonearmAtFinalRef = useRef(false)
   const timeoutRef = useRef(null)
+  const draggingTonearmRef = useRef(false)
 
   const tonearmEngaged = progress > 0
   const tonearmAtFinal = progress >= 1 - TONEARM_SETTLED_THRESHOLD
@@ -401,6 +402,20 @@ function HeroScene({ onPlayingChange }) {
     return () => cancelAnimationFrame(rafId)
   }, [])
 
+  // Mobile browsers decide whether a touch becomes a page-scroll before our
+  // pointerdown handler's preventDefault is guaranteed to take effect, so
+  // relying on that alone lets the browser occasionally win the race and
+  // swallow the drag. A non-passive touchmove listener's preventDefault is
+  // the one thing every mobile browser reliably honors, so use that instead,
+  // gated by this ref so it only blocks scrolling while actually dragging.
+  useEffect(() => {
+    const handleTouchMove = (event) => {
+      if (draggingTonearmRef.current) event.preventDefault()
+    }
+    window.addEventListener('touchmove', handleTouchMove, { passive: false })
+    return () => window.removeEventListener('touchmove', handleTouchMove)
+  }, [])
+
   // Clicking anywhere else on the turntable (base/vinyl, not the tonearm
   // itself) just toggles fully engaged/disengaged — no drag tracking, since
   // there's nothing there for the pointer to visually drag.
@@ -419,11 +434,8 @@ function HeroScene({ onPlayingChange }) {
   // the rest of the way on its own, like a magnet catching it.
   const handleTonearmPointerDown = (event) => {
     event.stopPropagation()
-    // Without this, touch input on the tonearm gets interpreted as a page
-    // scroll gesture before pointermove ever fires, since the canvas has no
-    // touch-action restricting that. Calling preventDefault on the pointerdown
-    // itself is what suppresses the browser's default touch scrolling here.
     event.nativeEvent.preventDefault()
+    draggingTonearmRef.current = true
     if (scrollControlEnabled) setScrollControlEnabled(false)
     document.body.style.cursor = 'grabbing'
 
@@ -447,6 +459,8 @@ function HeroScene({ onPlayingChange }) {
     const handlePointerUp = () => {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+      draggingTonearmRef.current = false
       document.body.style.cursor = 'pointer'
       if (!dragged) {
         progressTargetRef.current = progressTargetRef.current < 1 ? 1 : 0
@@ -455,6 +469,7 @@ function HeroScene({ onPlayingChange }) {
 
     window.addEventListener('pointermove', handlePointerMove)
     window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
   }
 
   // While scroll is driving the tonearm, wheel input moves its target along
