@@ -86,6 +86,7 @@ function Turntable({
   tonearmRotation,
   vinylSpinning,
   onTonearmPointerDown,
+  onTurntablePointerDown,
   ...props
 }) {
   const base = useGLTF('/turntable3.glb')
@@ -179,31 +180,39 @@ function Turntable({
   }, [vinyl.scene, vinylTexture])
 
   return (
-    <Center
-      {...props}
-      onPointerDown={onTonearmPointerDown}
-      onPointerOver={() => (document.body.style.cursor = 'grab')}
-      onPointerOut={() => (document.body.style.cursor = 'auto')}
-    >
-      <group position={basePosition} rotation={baseRotation}>
-        {/* Center re-centers the base's own bounding box to its local origin
-            first, so rotating this group spins it around its visual center
-            instead of the .glb's off-center pivot. */}
-        <Center>
-          <primitive object={base.scene} />
-        </Center>
-      </group>
-      <group position={vinylPosition} rotation={vinylRotation}>
-        <group position={vinylCenter}>
-          <group ref={vinylSpinRef}>
-            <primitive
-              object={vinyl.scene}
-              position={[-vinylCenter.x, -vinylCenter.y, -vinylCenter.z]}
-            />
+    <Center {...props}>
+      <group
+        onPointerDown={onTurntablePointerDown}
+        onPointerOver={() => (document.body.style.cursor = 'pointer')}
+        onPointerOut={() => (document.body.style.cursor = 'auto')}
+      >
+        <group position={basePosition} rotation={baseRotation}>
+          {/* Center re-centers the base's own bounding box to its local origin
+              first, so rotating this group spins it around its visual center
+              instead of the .glb's off-center pivot. */}
+          <Center>
+            <primitive object={base.scene} />
+          </Center>
+        </group>
+        <group position={vinylPosition} rotation={vinylRotation}>
+          <group position={vinylCenter}>
+            <group ref={vinylSpinRef}>
+              <primitive
+                object={vinyl.scene}
+                position={[-vinylCenter.x, -vinylCenter.y, -vinylCenter.z]}
+              />
+            </group>
           </group>
         </group>
       </group>
-      <primitive object={tonearm.scene} position={tonearmPosition} rotation={tonearmRotation} />
+      <primitive
+        object={tonearm.scene}
+        position={tonearmPosition}
+        rotation={tonearmRotation}
+        onPointerDown={onTonearmPointerDown}
+        onPointerOver={() => (document.body.style.cursor = 'grab')}
+        onPointerOut={() => (document.body.style.cursor = 'auto')}
+      />
     </Center>
   )
 }
@@ -297,7 +306,16 @@ function HeroScene({ onPlayingChange }) {
     return () => cancelAnimationFrame(rafId)
   }, [])
 
-  // Pressing the turntable hands control back to normal page scrolling, same
+  // Clicking anywhere else on the turntable (base/vinyl, not the tonearm
+  // itself) just toggles fully engaged/disengaged — no drag tracking, since
+  // there's nothing there for the pointer to visually drag.
+  const handleTurntablePointerDown = (event) => {
+    event.stopPropagation()
+    if (scrollControlEnabled) setScrollControlEnabled(false)
+    progressTargetRef.current = progressTargetRef.current < 1 ? 1 : 0
+  }
+
+  // Pressing the tonearm hands control back to normal page scrolling, same
   // as the old click did. A press+release with barely any movement still
   // toggles fully engaged/disengaged; an actual drag (leftward = toward the
   // record) moves the tonearm 1:1 with the pointer along its trajectory (it
@@ -413,6 +431,7 @@ function HeroScene({ onPlayingChange }) {
             tonearmRotation={tonearmRotation}
             vinylSpinning={tonearmEngaged}
             onTonearmPointerDown={handleTonearmPointerDown}
+            onTurntablePointerDown={handleTurntablePointerDown}
           />
           <Environment preset="sunset" />
         </Suspense>
